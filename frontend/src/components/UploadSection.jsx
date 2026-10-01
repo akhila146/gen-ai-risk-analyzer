@@ -1,8 +1,19 @@
 import React, { useRef } from 'react';
 import { UploadCloud, X } from 'lucide-react';
 
-export default function UploadSection({ selectedFile, onFileSelect, onClearFile, onAnalyze, loading }) {
+export default function UploadSection({
+  selectedFiles,
+  onFileSelect,
+  onClearFile,
+  onAnalyze,
+  loading,
+}) {
   const fileInputRef = useRef(null);
+
+  const validPdfFiles = (files) =>
+    Array.from(files || []).filter(
+      (file) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+    );
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -10,25 +21,24 @@ export default function UploadSection({ selectedFile, onFileSelect, onClearFile,
 
   const handleDrop = (e) => {
     e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0];
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        onFileSelect(file);
-      } else {
-        alert('Please upload a valid PDF document only.');
-      }
+    const pdfFiles = validPdfFiles(e.dataTransfer.files);
+
+    if (pdfFiles.length > 0) {
+      onFileSelect(pdfFiles);
+    } else {
+      alert('Please upload valid PDF document(s) only.');
     }
   };
 
   const handleChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        onFileSelect(file);
-      } else {
-        alert('Please upload a valid PDF document only.');
-      }
+    const pdfFiles = validPdfFiles(e.target.files);
+
+    if (pdfFiles.length > 0) {
+      onFileSelect(pdfFiles);
+    } else {
+      alert('Please upload valid PDF document(s) only.');
     }
+
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -40,8 +50,17 @@ export default function UploadSection({ selectedFile, onFileSelect, onClearFile,
         type="file"
         ref={fileInputRef}
         onChange={handleChange}
-        accept="application/pdf"
-        style={{ display: 'none' }}
+        accept="application/pdf,.pdf"
+        multiple
+        aria-label="Upload PDF files"
+        style={{
+          position: 'absolute',
+          width: '1px',
+          height: '1px',
+          opacity: 0,
+          pointerEvents: 'none',
+          overflow: 'hidden',
+        }}
       />
       <div
         className="drop-zone"
@@ -50,10 +69,19 @@ export default function UploadSection({ selectedFile, onFileSelect, onClearFile,
         onDrop={handleDrop}
       >
         <UploadCloud size={24} color="#1b5e20" style={{ marginBottom: 6 }} />
-        <div className="drop-text">Upload applicant financial PDF here</div>
-        {selectedFile && (
-          <div className="selected-file-badge">
-            <span>Selected: {selectedFile.name}</span>
+        <div className="drop-text">
+          {selectedFiles && selectedFiles.length > 0
+            ? 'Selected PDFs ready for analysis'
+            : 'Upload applicant financial PDFs here'}
+        </div>
+
+        {selectedFiles && selectedFiles.length > 0 && (
+          <div className="selected-files-list">
+            {selectedFiles.map((file, index) => (
+              <div key={`${file.name}-${index}`} className="selected-file-badge">
+                <span>{file.name}</span>
+              </div>
+            ))}
             <button
               type="button"
               className="clear-file-btn"
@@ -61,7 +89,7 @@ export default function UploadSection({ selectedFile, onFileSelect, onClearFile,
                 e.stopPropagation();
                 if (onClearFile) onClearFile();
               }}
-              aria-label="Remove selected file"
+              aria-label="Remove selected files"
             >
               <X size={14} />
             </button>
@@ -73,9 +101,9 @@ export default function UploadSection({ selectedFile, onFileSelect, onClearFile,
         <button
           className="analyze-btn"
           onClick={onAnalyze}
-          disabled={!selectedFile || loading}
+          disabled={!selectedFiles || selectedFiles.length === 0 || loading}
         >
-          {loading ? 'Analyzing...' : 'Analyze'}
+          {loading ? 'Analyzing...' : selectedFiles && selectedFiles.length > 1 ? 'Analyze All' : 'Analyze'}
         </button>
       </div>
     </div>

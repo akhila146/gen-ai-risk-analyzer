@@ -1,7 +1,7 @@
 import React from 'react';
 import { Download } from 'lucide-react';
 
-export default function ReportCards({ reportData, onDownload }) {
+export default function ReportCards({ reportData, onDownload, isSelected = false }) {
   if (!reportData) return null;
 
   const riskLevel = (reportData.risk_level || 'Unknown').toUpperCase();
@@ -12,7 +12,7 @@ export default function ReportCards({ reportData, onDownload }) {
   else if (riskLevel.includes('HIGH')) themeClass = 'theme-high';
 
   return (
-    <div className="report-section">
+    <div className={`report-section ${isSelected ? 'report-section-selected' : ''}`}>
       <div className="report-heading">Analyzed Report</div>
 
       <div className="cards-grid">

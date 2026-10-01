@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from io import BytesIO
 from google import genai
 from google.genai import types
@@ -8,6 +9,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+
+from datetime import datetime
+from database import retrieval_collection, retrieval_metrics_collection
 
 load_dotenv()
 
@@ -18,6 +22,196 @@ MODELS_TO_TRY = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"
 
 # --- 1. AI Analysis & RAG Service ---
 class AIService:
+    DEFAULT_MIN_RETRIEVAL_SCORE = 0.14
+    MAX_CONTEXT_CHUNKS = 4
+
+    @staticmethod
+    def split_text_into_chunks(raw_text: str, chunk_size: int = 800, overlap: int = 120) -> list[str]:
+        if not raw_text or not raw_text.strip():
+            return []
+
+        cleaned = re.sub(r"\s+", " ", raw_text).strip()
+        if len(cleaned) <= chunk_size:
+            return [cleaned]
+
+        chunks = []
+        start = 0
+        while start < len(cleaned):
+            end = min(start + chunk_size, len(cleaned))
+            if end < len(cleaned):
+                split_point = cleaned.rfind(" ", start, end)
+                if split_point > start + max(int(chunk_size * 0.6), 80):
+                    end = split_point
+
+            chunk = cleaned[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            if end >= len(cleaned):
+                break
+
+            start = max(start + chunk_size - overlap, end)
+
+        return chunks
+
+    @staticmethod
+    def _normalize_token(token: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (token or "").lower())
+
+    @staticmethod
+    def _keyword_overlap_score(question: str, chunk: str) -> float:
+        question_tokens = {
+            AIService._normalize_token(token)
+            for token in re.split(r"\s+", question.lower())
+            if AIService._normalize_token(token)
+        }
+        chunk_tokens = {
+            AIService._normalize_token(token)
+            for token in re.split(r"\s+", chunk.lower())
+            if AIService._normalize_token(token)
+        }
+
+        if not question_tokens or not chunk_tokens:
+            return 0.0
+
+        overlap = question_tokens & chunk_tokens
+        if not overlap:
+            return 0.0
+
+        return len(overlap) / max(len(question_tokens), 1)
+
+    @staticmethod
+    def _compute_cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
+        if not vector_a or not vector_b:
+            return 0.0
+
+        if len(vector_a) != len(vector_b):
+            min_len = min(len(vector_a), len(vector_b))
+            vector_a = vector_a[:min_len]
+            vector_b = vector_b[:min_len]
+
+        dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+        magnitude_a = sum(a * a for a in vector_a) ** 0.5
+        magnitude_b = sum(b * b for b in vector_b) ** 0.5
+
+        if magnitude_a == 0 or magnitude_b == 0:
+            return 0.0
+
+        return dot_product / (magnitude_a * magnitude_b)
+
+    @staticmethod
+    def _get_embedding_vector(text: str) -> list[float]:
+        if not text or not text.strip():
+            return []
+
+        try:
+            response = gemini_client.models.embed_content(
+                model="text-embedding-004",
+                contents=text.strip()
+            )
+            embeddings = getattr(response, "embeddings", None) or getattr(response, "data", None)
+            if not embeddings:
+                return []
+
+            values = embeddings[0].values if hasattr(embeddings[0], "values") else embeddings[0].get("values", [])
+            if isinstance(values, (list, tuple)):
+                return [float(v) for v in values]
+        except Exception:
+            return []
+
+        return []
+
+    @staticmethod
+    async def index_application_chunks(app_doc: dict) -> None:
+        application_id = app_doc.get("application_id") or app_doc.get("applicant_id")
+        raw_text = app_doc.get("raw_text", "") or ""
+        if not application_id or not raw_text.strip():
+            return
+
+        chunks = AIService.split_text_into_chunks(raw_text)
+        chunk_documents = []
+        for index, chunk in enumerate(chunks):
+            chunk_documents.append({
+                "application_id": application_id,
+                "document_hash": app_doc.get("document_hash"),
+                "chunk_index": index,
+                "text": chunk,
+                "embedding": AIService._get_embedding_vector(chunk),
+                "metadata": {
+                    "applicant_name": app_doc.get("applicant_name"),
+                    "risk_level": app_doc.get("risk_level"),
+                    "chunk_size": len(chunk),
+                },
+            })
+
+        await retrieval_collection.delete_many({"application_id": application_id})
+        if chunk_documents:
+            await retrieval_collection.insert_many(chunk_documents)
+
+    @staticmethod
+    async def retrieve_relevant_chunks(app_doc: dict, question: str, top_k: int = 4, min_score: float | None = None) -> list[dict]:
+        min_score = min_score if min_score is not None else AIService.DEFAULT_MIN_RETRIEVAL_SCORE
+        application_id = app_doc.get("application_id") or app_doc.get("applicant_id")
+        question_embedding = AIService._get_embedding_vector(question)
+        ranked = []
+
+        if application_id:
+            stored_chunks = await retrieval_collection.find({"application_id": application_id}).sort("chunk_index", 1).to_list(length=200)
+            if stored_chunks:
+                for chunk_doc in stored_chunks:
+                    chunk_text = chunk_doc.get("text") or ""
+                    if not chunk_text:
+                        continue
+                    embedding = chunk_doc.get("embedding") or AIService._get_embedding_vector(chunk_text)
+                    score = AIService._compute_cosine_similarity(question_embedding, embedding) if question_embedding and embedding else AIService._keyword_overlap_score(question, chunk_text)
+                    ranked.append({
+                        "chunk": chunk_text,
+                        "score": score,
+                        "metadata": chunk_doc.get("metadata", {}),
+                        "chunk_index": chunk_doc.get("chunk_index", 0),
+                    })
+
+        if not ranked:
+            raw_text = app_doc.get("raw_text", "") or ""
+            for chunk in AIService.split_text_into_chunks(raw_text):
+                score = AIService._compute_cosine_similarity(question_embedding, AIService._get_embedding_vector(chunk)) if question_embedding else AIService._keyword_overlap_score(question, chunk)
+                ranked.append({
+                    "chunk": chunk,
+                    "score": score,
+                    "metadata": {"fallback": True},
+                    "chunk_index": 0,
+                })
+
+        ranked = sorted(ranked, key=lambda item: item["score"], reverse=True)
+        filtered = [item for item in ranked if item["score"] >= min_score]
+        if not filtered:
+            filtered = ranked[:1]
+
+        selected = filtered[:top_k]
+        if not selected:
+            return []
+
+        return selected
+
+    @staticmethod
+    async def record_retrieval_metrics(application_id: str | None, question: str, results: list[dict]) -> None:
+        if not application_id:
+            return
+
+        await retrieval_metrics_collection.insert_one({
+            "application_id": application_id,
+            "question": question,
+            "retrieved_chunks": [
+                {
+                    "chunk_index": item.get("chunk_index"),
+                    "score": item.get("score"),
+                    "metadata": item.get("metadata", {}),
+                }
+                for item in results
+            ],
+            "created_at": datetime.utcnow(),
+        })
+
     @staticmethod
     async def analyze_document_text(raw_text: str) -> dict:
         prompt = f"""
@@ -98,41 +292,65 @@ Return ONLY raw valid JSON:
         raise last_error
 
     @staticmethod
-    async def chat_rag_response(app_doc: dict, chat_history: list, question: str) -> str:
+    async def chat_portfolio_response(applications: list[dict], chat_history: list, question: str) -> str:
+        if not applications:
+            return "No applications are available in the portfolio yet."
+
         history_str = "".join([f"User: {h.get('user_msg')}\nAssistant: {h.get('assistant_msg')}\n" for h in chat_history])
 
-        system_prompt = f"""
-You are the Dedicated Credit Risk AI Assistant for Application ID: {app_doc.get('application_id') or app_doc.get('applicant_id')}.
-Extract directly from this verified data context:
-- Applicant ID: {app_doc.get('application_id') or app_doc.get('applicant_id')}
-- Applicant Name: {app_doc.get('applicant_name')}
-- Contact: {app_doc.get('contact_number')}
-- Company & Role: {app_doc.get('company_name')} ({app_doc.get('job_role')})
-- Monthly Income: {app_doc.get('monthly_salary')}
-- Credit / CIBIL Score: {app_doc.get('credit_score')}
-- Existing EMIs: {app_doc.get('existing_emis')}
-- Liabilities: {app_doc.get('existing_liabilities')}
-- Requested Loan: {app_doc.get('requested_loan_amount')}
-- Loan Purpose: {app_doc.get('loan_purpose')}
-- House Ownership: {app_doc.get('own_house')}
-- Vehicles: {app_doc.get('vehicles')}
-- Risk Assessment: {app_doc.get('risk_level')}
-- Recommendation: {app_doc.get('recommendation')}
-- Key Factors: {', '.join(app_doc.get('key_factors', []))}
-- Overall Summary: {app_doc.get('summary')}
+        portfolio_lines = []
+        for index, app in enumerate(applications[:20], start=1):
+            app_id = app.get("application_id") or app.get("applicant_id") or f"APP-{index}"
+            applicant_name = app.get("applicant_name") or "N/A"
+            risk_level = app.get("risk_level") or "Unknown"
+            credit_score = app.get("credit_score") or "N/A"
+            monthly_salary = app.get("monthly_salary") or "N/A"
+            requested_loan_amount = app.get("requested_loan_amount") or "N/A"
+            existing_emis = app.get("existing_emis") or "N/A"
+            existing_liabilities = app.get("existing_liabilities") or "N/A"
+            own_house = app.get("own_house") or "N/A"
+            vehicles = app.get("vehicles") or "N/A"
+            home_loan_status = app.get("home_loan_status") or "N/A"
+            company_name = app.get("company_name") or "N/A"
+            job_role = app.get("job_role") or "N/A"
+            loan_purpose = app.get("loan_purpose") or "N/A"
+            recommendation = app.get("recommendation") or "N/A"
 
-Raw Document:
-\"\"\"{app_doc.get('raw_text', '')}\"\"\"
+            portfolio_lines.append(
+                f"{index}. Application ID: {app_id}; Applicant: {applicant_name}; "
+                f"Company: {company_name}; Role: {job_role}; "
+                f"Risk: {risk_level}; Credit Score: {credit_score}; "
+                f"Monthly Salary: {monthly_salary}; Requested Loan: {requested_loan_amount}; "
+                f"Existing EMIs: {existing_emis}; Existing Liabilities: {existing_liabilities}; "
+                f"Own House: {own_house}; Vehicles: {vehicles}; Home Loan Status: {home_loan_status}; "
+                f"Loan Purpose: {loan_purpose}; Recommendation: {recommendation}"
+            )
+
+        system_prompt = f"""
+You are the Portfolio Credit Risk AI Assistant for the entire application portfolio.
+Use only the portfolio data below to answer the user's question.
+
+Portfolio Data:
+{chr(10).join(portfolio_lines)}
 
 Conversation History:
 {history_str}
 
-Rules:
-1. Only answer based on this context.
-2. If asked specific values (e.g. 'cibil score', 'applicant name', 'salary'), state the exact value directly.
-3. If asked for 'summary', give a concise executive summary covering the applicant's financials and final decision.
-4. Do not speculate or invent unmentioned facts.
+Critical instruction:
+- Carefully inspect all fields in the portfolio data before answering.
+- For questions about ownership, vehicle, liabilities, salary, risk, credit score, or loan details, use the exact values from the records above.
+- Do not answer 'not available' when the field value is present in the portfolio data.
+- If a field is missing, only then say it is not available.
+
+Strict output rules:
+1. Answer using only the portfolio data provided.
+2. For direct factual questions like total applications, average credit score, risk counts, or applicant-specific values, return the exact answer.
+3. When referencing applicants, include their application IDs exactly as they appear in the data, such as APP-101, APP-104.
+4. Keep answers concise, business-friendly, and easy to read.
+5. Do not start with phrases like 'Based on the portfolio data', 'According to', or 'From the retrieved evidence'.
+6. For comparison or summary questions, provide a short answer with the relevant application IDs mentioned clearly.
 """
+
         last_error = None
         for model_name in MODELS_TO_TRY:
             try:
@@ -142,6 +360,60 @@ Rules:
                     config=types.GenerateContentConfig(temperature=0.2)
                 )
                 return response.text.strip()
+            except Exception as e:
+                last_error = e
+                continue
+        raise last_error
+
+    @staticmethod
+    async def chat_rag_response(app_doc: dict, chat_history: list, question: str) -> str:
+        history_str = "".join([f"User: {h.get('user_msg')}\nAssistant: {h.get('assistant_msg')}\n" for h in chat_history])
+        relevant_chunks = await AIService.retrieve_relevant_chunks(app_doc, question, top_k=AIService.MAX_CONTEXT_CHUNKS)
+        evidence_lines = []
+        for idx, item in enumerate(relevant_chunks, start=1):
+            chunk_text = item.get("chunk") or ""
+            evidence_lines.append(f"[{idx}] {chunk_text}")
+        evidence = "\n\n---\n\n".join(evidence_lines) if evidence_lines else app_doc.get("raw_text", "")
+
+        system_prompt = f"""
+You are the Dedicated Credit Risk AI Assistant for Application ID: {app_doc.get('application_id') or app_doc.get('applicant_id')}.
+
+Answer using only the retrieved evidence and metadata below.
+
+Application Metadata:
+- Applicant ID: {app_doc.get('application_id') or app_doc.get('applicant_id')}
+- Applicant Name: {app_doc.get('applicant_name')}
+- Risk Assessment: {app_doc.get('risk_level')}
+- Recommendation: {app_doc.get('recommendation')}
+
+Retrieved Evidence:
+{evidence}
+
+Conversation History:
+{history_str}
+
+Strict output rules:
+1. For direct factual questions like credit score, risk level, salary, loan amount, applicant name, company name, or any single value, return only the exact answer value.
+2. Do not start with phrases such as 'Based on the retrieved evidence', 'According to', 'From the retrieved data', 'I found', or 'The retrieved evidence shows'.
+3. Do not include citations, explanations, or reasoning in direct-value questions.
+4. If the value is missing from the evidence, return exactly: 'Not available in the document'.
+5. For summary/compare questions, provide a concise answer without a retrieval preamble.
+"""
+        last_error = None
+        for model_name in MODELS_TO_TRY:
+            try:
+                response = gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=f"{system_prompt}\nUser Question: {question}\nAssistant Answer:",
+                    config=types.GenerateContentConfig(temperature=0.2)
+                )
+                answer = response.text.strip()
+                await AIService.record_retrieval_metrics(
+                    app_doc.get("application_id") or app_doc.get("applicant_id"),
+                    question,
+                    relevant_chunks,
+                )
+                return answer
             except Exception as e:
                 last_error = e
                 continue

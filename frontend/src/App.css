@@ -94,8 +94,15 @@
   font-weight: 500;
 }
 
+.selected-files-list {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
 .selected-file-badge {
-  margin: 14px auto 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -177,11 +184,140 @@
   color: #c62828;
 }
 
+.batch-results-panel {
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+
+.batch-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.batch-result-item {
+  background: #f8fbf8;
+  border: 1px solid #dfeee0;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.batch-file-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #2d3b2d;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
+.batch-status {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+
+.batch-status.success {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.batch-status.missing_fields {
+  background: #fff8e1;
+  color: #b7791f;
+}
+
+.batch-status.data_not_found,
+.batch-status.error,
+.batch-status.invalid_file {
+  background: #ffebee;
+  color: #c62828;
+}
+
+.batch-result-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: #4e5d4e;
+}
+
+.batch-message {
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: #5d5d5d;
+}
+
+.download-action-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.download-btn {
+  background-color: #212121;
+  color: #ffffff;
+  border: none;
+  padding: 10px 22px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.download-btn:hover {
+  background-color: #000000;
+}
+
 /* 4 Report Cards */
+.dashboard-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -6px;
+  margin-bottom: 6px;
+}
+
+.dashboard-toggle-btn {
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  color: #374151;
+  border-radius: 6px;
+  padding: 7px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 1.2;
+}
+
+.dashboard-toggle-btn:hover {
+  background: #e5e7eb;
+  border-color: #9ca3af;
+}
+
 .report-section {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  padding: 10px;
+  border-radius: 10px;
+  transition: all 0.2s ease;
+}
+
+.report-section-selected {
+  border: 2px solid #1b5e20;
+  background: #f1f8f2;
+  box-shadow: 0 0 0 3px rgba(27, 94, 32, 0.08);
 }
 
 .report-heading {
@@ -270,6 +406,147 @@
   color: #c62828 !important;
 }
 
+/* Dashboard Panel */
+.dashboard-panel {
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.dashboard-header h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.dashboard-header span {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.dashboard-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.dashboard-stat {
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 14px 12px;
+}
+
+.dashboard-stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.dashboard-stat-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.dashboard-stat.risk-low {
+  background: #e8f5e9;
+  border-color: #a5d6a7;
+}
+
+.dashboard-stat.risk-medium {
+  background: #fff3e0;
+  border-color: #ffcc80;
+}
+
+.dashboard-stat.risk-high {
+  background: #ffebee;
+  border-color: #ef9a9a;
+}
+
+.recent-applications-card {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.recent-applications-header {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #374151;
+  margin-bottom: 10px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+th,
+td {
+  padding: 10px 8px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+  color: #374151;
+}
+
+th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.risk-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.risk-badge.risk-low {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.risk-badge.risk-medium {
+  background: #fff7ed;
+  color: #9a5b00;
+}
+
+.risk-badge.risk-high {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.empty-state {
+  color: #6b7280;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 900px) {
+  .dashboard-stats-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+}
+
 /* Download Action */
 .download-action-row {
   display: flex;
@@ -349,6 +626,56 @@
   cursor: pointer;
 }
 
+.chat-scope-switch {
+  display: flex;
+  gap: 8px;
+  padding: 12px 12px 0;
+  background: #f7faf7;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.scope-btn {
+  flex: 1;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  border-radius: 999px;
+  padding: 8px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.scope-btn.active {
+  background: #e8f5e9;
+  border-color: #81c784;
+  color: #1b5e20;
+}
+
+.chat-app-select-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 12px 0;
+  background: #f7faf7;
+}
+
+.chat-app-select-wrap label {
+  font-size: 0.72rem;
+  color: #4b5563;
+  font-weight: 600;
+}
+
+.chat-app-select-wrap select {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  background: #ffffff;
+  color: #1f2937;
+}
+
 .chat-messages {
   flex: 1;
   padding: 14px;
@@ -376,6 +703,25 @@
   background-color: #f0f0f0;
   color: #212121;
   align-self: flex-start;
+}
+
+.chat-app-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  margin: 0 4px 4px 0;
+  border: 1px solid #a5d6a7;
+  background: #e8f5e9;
+  color: #1b5e20;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.chat-app-badge:hover {
+  background: #dceddc;
 }
 
 .chat-input-form {
