@@ -1,8 +1,11 @@
 import os
 import json
+import logging
 import re
+import time
 from io import BytesIO
 from google import genai
+from google.genai import errors
 from google.genai import types
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import letter
@@ -17,8 +20,46 @@ load_dotenv()
 
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
 
-# Primary & Fallback models (traffic lekunda immediate ga execute avvadaniki)
-MODELS_TO_TRY = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "gemini-2.5-flash")
+GENERATION_FALLBACK_MODELS = tuple(
+    model.strip()
+    for model in os.getenv("GEMINI_FALLBACK_MODELS", "").split(",")
+    if model.strip() and model.strip() != GENERATION_MODEL
+)
+EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
+logger = logging.getLogger(__name__)
+
+
+def generate_content_with_retry(**kwargs):
+    primary_model = kwargs.pop("model", GENERATION_MODEL)
+    models = (primary_model,) + tuple(
+        model for model in GENERATION_FALLBACK_MODELS if model != primary_model
+    )
+
+    for model_index, model_name in enumerate(models):
+        attempts = 3 if model_index == 0 else 1
+        for attempt in range(attempts):
+            try:
+                return gemini_client.models.generate_content(model=model_name, **kwargs)
+            except errors.ServerError as exc:
+                if exc.code != 503:
+                    raise
+                if attempt < attempts - 1:
+                    delay = attempt + 1
+                    logger.warning(
+                        "Gemini model %s returned 503; retrying in %s second(s).",
+                        model_name,
+                        delay,
+                    )
+                    time.sleep(delay)
+                elif model_index < len(models) - 1:
+                    logger.warning(
+                        "Gemini model %s remains unavailable; trying configured fallback model.",
+                        model_name,
+                    )
+                else:
+                    raise
+
 
 # --- 1. AI Analysis & RAG Service ---
 class AIService:
@@ -86,9 +127,7 @@ class AIService:
             return 0.0
 
         if len(vector_a) != len(vector_b):
-            min_len = min(len(vector_a), len(vector_b))
-            vector_a = vector_a[:min_len]
-            vector_b = vector_b[:min_len]
+            return 0.0
 
         dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
         magnitude_a = sum(a * a for a in vector_a) ** 0.5
@@ -100,23 +139,33 @@ class AIService:
         return dot_product / (magnitude_a * magnitude_b)
 
     @staticmethod
-    def _get_embedding_vector(text: str) -> list[float]:
+    def _get_embedding_vector(text: str, *, is_query: bool = False) -> list[float]:
         if not text or not text.strip():
             return []
 
+        contents = (
+            f"task: question answering | query: {text.strip()}"
+            if is_query
+            else f"title: none | text: {text.strip()}"
+        )
         try:
             response = gemini_client.models.embed_content(
-                model="text-embedding-004",
-                contents=text.strip()
+                model=EMBEDDING_MODEL,
+                contents=contents
             )
             embeddings = getattr(response, "embeddings", None) or getattr(response, "data", None)
             if not embeddings:
+                logger.warning("Embedding model %s returned no embeddings.", EMBEDDING_MODEL)
                 return []
 
             values = embeddings[0].values if hasattr(embeddings[0], "values") else embeddings[0].get("values", [])
             if isinstance(values, (list, tuple)):
-                return [float(v) for v in values]
+                vector = [float(value) for value in values]
+                if vector:
+                    return vector
+            logger.warning("Embedding model %s returned an empty or invalid vector.", EMBEDDING_MODEL)
         except Exception:
+            logger.exception("Embedding generation failed with model %s.", EMBEDDING_MODEL)
             return []
 
         return []
@@ -137,6 +186,7 @@ class AIService:
                 "chunk_index": index,
                 "text": chunk,
                 "embedding": AIService._get_embedding_vector(chunk),
+                "embedding_model": EMBEDDING_MODEL,
                 "metadata": {
                     "applicant_name": app_doc.get("applicant_name"),
                     "risk_level": app_doc.get("risk_level"),
@@ -152,7 +202,7 @@ class AIService:
     async def retrieve_relevant_chunks(app_doc: dict, question: str, top_k: int = 4, min_score: float | None = None) -> list[dict]:
         min_score = min_score if min_score is not None else AIService.DEFAULT_MIN_RETRIEVAL_SCORE
         application_id = app_doc.get("application_id") or app_doc.get("applicant_id")
-        question_embedding = AIService._get_embedding_vector(question)
+        question_embedding = AIService._get_embedding_vector(question, is_query=True)
         ranked = []
 
         if application_id:
@@ -162,8 +212,21 @@ class AIService:
                     chunk_text = chunk_doc.get("text") or ""
                     if not chunk_text:
                         continue
-                    embedding = chunk_doc.get("embedding") or AIService._get_embedding_vector(chunk_text)
-                    score = AIService._compute_cosine_similarity(question_embedding, embedding) if question_embedding and embedding else AIService._keyword_overlap_score(question, chunk_text)
+                    stored_embedding = chunk_doc.get("embedding") or []
+                    if chunk_doc.get("embedding_model") == EMBEDDING_MODEL and stored_embedding:
+                        embedding = stored_embedding
+                    else:
+                        embedding = AIService._get_embedding_vector(chunk_text)
+                        if embedding and chunk_doc.get("_id") is not None:
+                            await retrieval_collection.update_one(
+                                {"_id": chunk_doc["_id"]},
+                                {"$set": {"embedding": embedding, "embedding_model": EMBEDDING_MODEL}},
+                            )
+
+                    if question_embedding and embedding and len(question_embedding) == len(embedding):
+                        score = AIService._compute_cosine_similarity(question_embedding, embedding)
+                    else:
+                        score = AIService._keyword_overlap_score(question, chunk_text)
                     ranked.append({
                         "chunk": chunk_text,
                         "score": score,
@@ -174,7 +237,11 @@ class AIService:
         if not ranked:
             raw_text = app_doc.get("raw_text", "") or ""
             for chunk in AIService.split_text_into_chunks(raw_text):
-                score = AIService._compute_cosine_similarity(question_embedding, AIService._get_embedding_vector(chunk)) if question_embedding else AIService._keyword_overlap_score(question, chunk)
+                chunk_embedding = AIService._get_embedding_vector(chunk)
+                if question_embedding and chunk_embedding and len(question_embedding) == len(chunk_embedding):
+                    score = AIService._compute_cosine_similarity(question_embedding, chunk_embedding)
+                else:
+                    score = AIService._keyword_overlap_score(question, chunk)
                 ranked.append({
                     "chunk": chunk,
                     "score": score,
@@ -274,22 +341,15 @@ Return ONLY raw valid JSON:
   "summary": "..."
 }}
 """
-        last_error = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                response = gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1
-                    )
-                )
-                return json.loads(response.text)
-            except Exception as e:
-                last_error = e
-                continue
-        raise last_error
+        response = generate_content_with_retry(
+            model=GENERATION_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            )
+        )
+        return json.loads(response.text)
 
     @staticmethod
     async def chat_portfolio_response(applications: list[dict], chat_history: list, question: str) -> str:
@@ -351,19 +411,12 @@ Strict output rules:
 6. For comparison or summary questions, provide a short answer with the relevant application IDs mentioned clearly.
 """
 
-        last_error = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                response = gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=f"{system_prompt}\nUser Question: {question}\nAssistant Answer:",
-                    config=types.GenerateContentConfig(temperature=0.2)
-                )
-                return response.text.strip()
-            except Exception as e:
-                last_error = e
-                continue
-        raise last_error
+        response = generate_content_with_retry(
+            model=GENERATION_MODEL,
+            contents=f"{system_prompt}\nUser Question: {question}\nAssistant Answer:",
+            config=types.GenerateContentConfig(temperature=0.2)
+        )
+        return response.text.strip()
 
     @staticmethod
     async def chat_rag_response(app_doc: dict, chat_history: list, question: str) -> str:
@@ -399,25 +452,18 @@ Strict output rules:
 4. If the value is missing from the evidence, return exactly: 'Not available in the document'.
 5. For summary/compare questions, provide a concise answer without a retrieval preamble.
 """
-        last_error = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                response = gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=f"{system_prompt}\nUser Question: {question}\nAssistant Answer:",
-                    config=types.GenerateContentConfig(temperature=0.2)
-                )
-                answer = response.text.strip()
-                await AIService.record_retrieval_metrics(
-                    app_doc.get("application_id") or app_doc.get("applicant_id"),
-                    question,
-                    relevant_chunks,
-                )
-                return answer
-            except Exception as e:
-                last_error = e
-                continue
-        raise last_error
+        response = generate_content_with_retry(
+            model=GENERATION_MODEL,
+            contents=f"{system_prompt}\nUser Question: {question}\nAssistant Answer:",
+            config=types.GenerateContentConfig(temperature=0.2)
+        )
+        answer = response.text.strip()
+        await AIService.record_retrieval_metrics(
+            app_doc.get("application_id") or app_doc.get("applicant_id"),
+            question,
+            relevant_chunks,
+        )
+        return answer
 
 
 # --- 2. ReportLab PDF Generation Service ---

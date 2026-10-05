@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime
 from io import BytesIO
@@ -20,6 +21,8 @@ from database import (
     get_effective_application_id,
 )
 from services import AIService, PDFService
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -155,7 +158,7 @@ async def analyze_uploaded_pdf(file_name: str, file_bytes: bytes) -> dict:
     try:
         await AIService.index_application_chunks(record)
     except Exception:
-        pass
+        logger.exception("Failed to index retrieval chunks for application %s", application_id)
 
     record["application_updated"] = bool(result.upserted_id is None)
     return {"status": status, "data": record}
