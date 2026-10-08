@@ -170,7 +170,6 @@ class AIService:
                 "risk_level": app_doc.get("risk_level", ""),
             })
 
-        # Remove existing chunks for this application before adding fresh ones
         try:
             existing = chroma_collection.get(where={"application_id": application_id})
             if existing and existing["ids"]:
@@ -207,7 +206,6 @@ class AIService:
                     distances = results["distances"][0] if "distances" in results and results["distances"] else [0.0] * len(docs)
 
                     for doc, meta, dist in zip(docs, metas, distances):
-                        # Convert Chroma distance to similarity score
                         score = 1.0 - dist if dist <= 1.0 else 0.0
                         if score >= min_score:
                             ranked.append({
@@ -252,12 +250,9 @@ class AIService:
         })
 
     @staticmethod
-    async def analyze_document_text(raw_text: str) -> dict:
-        prompt = f"""
-You are a Financial Credit Risk Analysis Engine. Analyze the following document text and return a STRICT JSON object only.
-
-Document Text:
-\"\"\"{raw_text}\"\"\"
+    async def analyze_document_text(raw_text: str | None = None, image_bytes: bytes | None = None, mime_type: str | None = None) -> dict:
+        prompt = """
+You are a Financial Credit Risk Analysis Engine. Analyze the provided document text or image and return a STRICT JSON object only.
 
 Extraction & Risk Rules:
 1. Extract:
@@ -291,7 +286,7 @@ Extraction & Risk Rules:
 6. summary: Full profile summary paragraph.
 
 Return ONLY raw valid JSON:
-{{
+{
   "application_id": "...",
   "applicant_name": "...",
   "contact_number": "...",
@@ -311,11 +306,18 @@ Return ONLY raw valid JSON:
   "recommendation": "...",
   "key_factors": ["...", "...", "..."],
   "summary": "..."
-}}
+}
 """
+        contents = []
+        if image_bytes and mime_type:
+            contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+            contents.append(f"Analyze this financial document image/OCR source according to these rules:\n{prompt}")
+        else:
+            contents.append(f"Document Text:\n\"\"\"{raw_text}\"\"\"\n\n{prompt}")
+
         response = generate_content_with_retry(
             model=GENERATION_MODEL,
-            contents=prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1

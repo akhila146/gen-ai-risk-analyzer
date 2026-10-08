@@ -1,4 +1,6 @@
 import os
+import csv
+import docx
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
@@ -8,7 +10,11 @@ os.makedirs("test_pdfs", exist_ok=True)
 styles = getSampleStyleSheet()
 
 def build_pdf(filename, title, data_rows):
-    doc = SimpleDocTemplate(f"test_pdfs/{filename}", pagesize=letter)
+    base_name = filename.replace(".pdf", "")
+    
+    # 1. Original PDF Generation Code (.pdf)
+    pdf_path = f"test_pdfs/{filename}"
+    doc = SimpleDocTemplate(pdf_path, pagesize=letter)
     story = [
         Paragraph(f"<b>{title}</b>", styles['Title']),
         Spacer(1, 15)
@@ -24,7 +30,34 @@ def build_pdf(filename, title, data_rows):
     doc.build(story)
     print(f"Generated test_pdfs/{filename}")
 
-# 1. Low Risk
+    # 2. Added Word Document (.docx)
+    docx_path = f"test_pdfs/{base_name}.docx"
+    docx_doc = docx.Document()
+    if title:
+        docx_doc.add_heading(title, level=1)
+    for row in data_rows:
+        docx_doc.add_paragraph(f"{row[0]}: {row[1]}")
+    docx_doc.save(docx_path)
+    print(f"Generated test_pdfs/{base_name}.docx")
+
+    # 3. Added Text File (.txt)
+    txt_path = f"test_pdfs/{base_name}.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        if title:
+            f.write(f"{title}\n" + "="*40 + "\n")
+        for row in data_rows:
+            f.write(f"{row[0]}: {row[1]}\n")
+    print(f"Generated test_pdfs/{base_name}.txt")
+
+    # 4. Added CSV File (.csv)
+    csv_path = f"test_pdfs/{base_name}.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Field", "Value"])
+        writer.writerows(data_rows)
+    print(f"Generated test_pdfs/{base_name}.csv")
+
+# 1. Low Risk[cite: 10]
 build_pdf("1_low_risk.pdf", "Applicant Financial & Credit Profile", [
     ["Applicant ID", "APP-2026-001"],
     ["Applicant Name", "Rahul Sharma"],
@@ -42,7 +75,7 @@ build_pdf("1_low_risk.pdf", "Applicant Financial & Credit Profile", [
     ["Home Loan Status", "None"]
 ])
 
-# 2. Medium Risk
+# 2. Medium Risk[cite: 10]
 build_pdf("2_medium_risk.pdf", "Applicant Financial & Credit Profile", [
     ["Applicant ID", "APP-2026-002"],
     ["Applicant Name", "Kiran Varma"],
@@ -60,7 +93,7 @@ build_pdf("2_medium_risk.pdf", "Applicant Financial & Credit Profile", [
     ["Home Loan Status", "Active personal loan present"]
 ])
 
-# 3. High Risk
+# 3. High Risk[cite: 10]
 build_pdf("3_high_risk.pdf", "Applicant Financial & Credit Profile", [
     ["Applicant ID", "APP-2026-003"],
     ["Applicant Name", "Vikram Rathore"],
@@ -78,7 +111,7 @@ build_pdf("3_high_risk.pdf", "Applicant Financial & Credit Profile", [
     ["Home Loan Status", "Multiple defaults noted"]
 ])
 
-# 4. Missing Mandatory Fields
+# 4. Missing Mandatory Fields[cite: 10]
 build_pdf("4_missing_fields.pdf", "Applicant Financial & Credit Profile (Incomplete)", [
     ["Applicant ID", "APP-2026-004"],
     ["Applicant Name", "Anitha Reddy"],
@@ -96,10 +129,10 @@ build_pdf("4_missing_fields.pdf", "Applicant Financial & Credit Profile (Incompl
     ["Home Loan Status", "Unknown"]
 ])
 
-# 5. Empty PDF
+# 5. Empty PDF[cite: 10]
 build_pdf("5_empty.pdf", "", [])
 
-# 6. Duplicate applicant with changed values (should update existing record instead of creating a new one)
+# 6. Duplicate applicant with changed values[cite: 10]
 build_pdf("6_duplicate_applicant_update.pdf", "Applicant Financial & Credit Profile", [
     ["Applicant ID", "APP-2026-001"],
     ["Applicant Name", "Rahul Sharma"],

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
+import docx
 from dotenv import load_dotenv
 
 from database import (
@@ -58,13 +59,46 @@ class ChatRequest(BaseModel):
     message: str
 
 
-def parse_pdf_text(file_bytes: bytes) -> str:
-    try:
-        reader = PdfReader(BytesIO(file_bytes))
-        extracted = "".join([page.extract_text() or "" for page in reader.pages])
-        return extracted.strip()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"PDF reading error: {str(exc)}")
+def parse_file_content(file_bytes: bytes, filename: str) -> tuple[str | None, bytes | None, str | None]:
+    """
+    Parses different file types and returns text or raw bytes for multimodal/OCR analysis.
+    Returns: (extracted_text, raw_image_bytes, mime_type)
+    """
+    ext = filename.lower().split('.')[-1]
+    
+    if ext == "pdf":
+        try:
+            reader = PdfReader(BytesIO(file_bytes))
+            extracted = "".join([page.extract_text() or "" for page in reader.pages])
+            return extracted.strip(), None, None
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"PDF reading error: {str(exc)}")
+            
+    elif ext == "docx":
+        try:
+            doc = docx.Document(BytesIO(file_bytes))
+            extracted = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            return extracted.strip(), None, None
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"DOCX reading error: {str(exc)}")
+            
+    elif ext in ["txt", "csv"]:
+        try:
+            return file_bytes.decode("utf-8", errors="ignore").strip(), None, None
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Text reading error: {str(exc)}")
+            
+    elif ext in ["png", "jpg", "jpeg", "webp"]:
+        mime_map = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp"
+        }
+        return None, file_bytes, mime_map.get(ext, "image/jpeg")
+        
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported file format: .{ext}")
 
 
 def normalize_risk_value(value: Any) -> str:
@@ -107,18 +141,23 @@ def calculate_dashboard_summary(applications: list[dict] | None) -> dict:
     }
 
 
-async def analyze_uploaded_pdf(file_name: str, file_bytes: bytes) -> dict:
-    raw_text = parse_pdf_text(file_bytes)
+async def analyze_uploaded_file(file_name: str, file_bytes: bytes) -> dict:
+    extracted_text, image_bytes, mime_type = parse_file_content(file_bytes, file_name)
 
-    if not raw_text or len(raw_text.strip()) < 15:
+    if extracted_text and len(extracted_text.strip()) < 15 and not image_bytes:
         return {
             "status": "DATA_NOT_FOUND",
-            "message": "Data not found in the uploaded PDF.",
+            "message": "Data not found in the uploaded file.",
             "data": None,
         }
 
     try:
-        extracted = await AIService.analyze_document_text(raw_text)
+        if image_bytes and mime_type:
+            extracted = await AIService.analyze_document_text(image_bytes=image_bytes, mime_type=mime_type)
+            raw_text = f"[Multimodal Image Document: {file_name}]"
+        else:
+            extracted = await AIService.analyze_document_text(raw_text=extracted_text)
+            raw_text = extracted_text
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"AI Analysis failed: {str(exc)}")
 
@@ -162,36 +201,26 @@ async def analyze_uploaded_pdf(file_name: str, file_bytes: bytes) -> dict:
 
 
 @app.post("/api/analyze")
-async def analyze_pdf(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
+async def analyze_file(file: UploadFile = File(...)):
     file_bytes = await file.read()
-    return await analyze_uploaded_pdf(file.filename, file_bytes)
+    return await analyze_uploaded_file(file.filename or "unknown", file_bytes)
 
 
 @app.post("/api/analyze-bulk")
-async def analyze_bulk_pdfs(files: list[UploadFile] = File(...)):
+async def analyze_bulk_files(files: list[UploadFile] = File(...)):
     if not files:
-        raise HTTPException(status_code=400, detail="At least one PDF file is required.")
+        raise HTTPException(status_code=400, detail="At least one file is required.")
 
     processed_files: list[dict] = []
     valid_applications: list[dict] = []
 
     for uploaded_file in files:
-        if not uploaded_file.filename or not uploaded_file.filename.lower().endswith(".pdf"):
-            processed_files.append({
-                "filename": uploaded_file.filename or "unknown.pdf",
-                "status": "INVALID_FILE",
-                "message": "Only PDF files are supported.",
-            })
-            continue
-
+        filename = uploaded_file.filename or "unknown"
         try:
             file_bytes = await uploaded_file.read()
-            result = await analyze_uploaded_pdf(uploaded_file.filename, file_bytes)
+            result = await analyze_uploaded_file(filename, file_bytes)
             processed_files.append({
-                "filename": uploaded_file.filename,
+                "filename": filename,
                 "status": result.get("status", "ERROR"),
                 "message": result.get("message"),
                 "data": result.get("data"),
@@ -200,7 +229,7 @@ async def analyze_bulk_pdfs(files: list[UploadFile] = File(...)):
                 valid_applications.append(result["data"])
         except Exception as exc:
             processed_files.append({
-                "filename": uploaded_file.filename,
+                "filename": filename,
                 "status": "ERROR",
                 "message": str(exc),
             })
