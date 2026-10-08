@@ -10,33 +10,29 @@ export default function UploadSection({
 }) {
   const fileInputRef = useRef(null);
 
-  const validPdfFiles = (files) =>
-    Array.from(files || []).filter(
-      (file) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
-    );
-
+  // Allow all types of files instead of restricting to PDF only
   const handleDragOver = (e) => {
     e.preventDefault();
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
-    const pdfFiles = validPdfFiles(e.dataTransfer.files);
+    const files = Array.from(e.dataTransfer.files || []);
 
-    if (pdfFiles.length > 0) {
-      onFileSelect(pdfFiles);
+    if (files.length > 0) {
+      onFileSelect(files);
     } else {
-      alert('Please upload valid PDF document(s) only.');
+      alert('Please upload valid document(s).');
     }
   };
 
   const handleChange = (e) => {
-    const pdfFiles = validPdfFiles(e.target.files);
+    const files = Array.from(e.target.files || []);
 
-    if (pdfFiles.length > 0) {
-      onFileSelect(pdfFiles);
+    if (files.length > 0) {
+      onFileSelect(files);
     } else {
-      alert('Please upload valid PDF document(s) only.');
+      alert('Please upload valid document(s).');
     }
 
     if (fileInputRef.current) {
@@ -50,9 +46,8 @@ export default function UploadSection({
         type="file"
         ref={fileInputRef}
         onChange={handleChange}
-        accept="application/pdf,.pdf"
         multiple
-        aria-label="Upload PDF files"
+        aria-label="Upload files"
         style={{
           position: 'absolute',
           width: '1px',
@@ -71,8 +66,8 @@ export default function UploadSection({
         <UploadCloud size={24} color="#1b5e20" style={{ marginBottom: 6 }} />
         <div className="drop-text">
           {selectedFiles && selectedFiles.length > 0
-            ? 'Selected PDFs ready for analysis'
-            : 'Upload applicant financial PDFs here'}
+            ? 'Selected files ready for analysis'
+            : 'Upload applicant financial files here (PDF, Word, Text, etc.)'}
         </div>
 
         {selectedFiles && selectedFiles.length > 0 && (

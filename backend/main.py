@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from database import (
     applications_collection,
     chat_history_collection,
-    retrieval_collection,
     retrieval_metrics_collection,
     build_application_upsert_filter,
     build_document_fingerprint,
@@ -35,8 +34,6 @@ async def startup_event():
     await applications_collection.create_index([("applicant_id", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("document_hash", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("created_at", -1)])
-    await retrieval_collection.create_index([("application_id", 1), ("chunk_index", 1)])
-    await retrieval_collection.create_index([("document_hash", 1)])
     await retrieval_metrics_collection.create_index([("application_id", 1), ("created_at", -1)])
 
 

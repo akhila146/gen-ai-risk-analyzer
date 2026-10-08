@@ -68,5 +68,4 @@ def build_application_upsert_filter(extracted: dict, raw_text: str) -> dict:
 
 applications_collection = db["applications"]
 chat_history_collection = db["chat_history"]
-retrieval_collection = db["retrieval_chunks"]
 retrieval_metrics_collection = db["retrieval_metrics"]

@@ -12,9 +12,10 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+import chromadb
 
 from datetime import datetime
-from database import retrieval_collection, retrieval_metrics_collection
+from database import retrieval_metrics_collection
 
 load_dotenv()
 
@@ -28,6 +29,15 @@ GENERATION_FALLBACK_MODELS = tuple(
 )
 EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 logger = logging.getLogger(__name__)
+
+# --- Chroma Cloud 
+chroma_client = chromadb.CloudClient(
+    api_key=os.getenv("CHROMA_API_KEY"),
+    tenant=os.getenv("CHROMA_TENANT"),
+    database=os.getenv("CHROMA_DATABASE")
+)
+
+chroma_collection = chroma_client.get_or_create_collection(name="credit_risk_vectors")
 
 
 def generate_content_with_retry(**kwargs):
@@ -96,49 +106,6 @@ class AIService:
         return chunks
 
     @staticmethod
-    def _normalize_token(token: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", (token or "").lower())
-
-    @staticmethod
-    def _keyword_overlap_score(question: str, chunk: str) -> float:
-        question_tokens = {
-            AIService._normalize_token(token)
-            for token in re.split(r"\s+", question.lower())
-            if AIService._normalize_token(token)
-        }
-        chunk_tokens = {
-            AIService._normalize_token(token)
-            for token in re.split(r"\s+", chunk.lower())
-            if AIService._normalize_token(token)
-        }
-
-        if not question_tokens or not chunk_tokens:
-            return 0.0
-
-        overlap = question_tokens & chunk_tokens
-        if not overlap:
-            return 0.0
-
-        return len(overlap) / max(len(question_tokens), 1)
-
-    @staticmethod
-    def _compute_cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
-        if not vector_a or not vector_b:
-            return 0.0
-
-        if len(vector_a) != len(vector_b):
-            return 0.0
-
-        dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
-        magnitude_a = sum(a * a for a in vector_a) ** 0.5
-        magnitude_b = sum(b * b for b in vector_b) ** 0.5
-
-        if magnitude_a == 0 or magnitude_b == 0:
-            return 0.0
-
-        return dot_product / (magnitude_a * magnitude_b)
-
-    @staticmethod
     def _get_embedding_vector(text: str, *, is_query: bool = False) -> list[float]:
         if not text or not text.strip():
             return []
@@ -178,25 +145,46 @@ class AIService:
             return
 
         chunks = AIService.split_text_into_chunks(raw_text)
-        chunk_documents = []
+        if not chunks:
+            return
+
+        ids = []
+        documents = []
+        embeddings = []
+        metadatas = []
+
         for index, chunk in enumerate(chunks):
-            chunk_documents.append({
+            chunk_id = f"{application_id}_{index}"
+            vector = AIService._get_embedding_vector(chunk)
+            if not vector:
+                continue
+
+            ids.append(chunk_id)
+            documents.append(chunk)
+            embeddings.append(vector)
+            metadatas.append({
                 "application_id": application_id,
-                "document_hash": app_doc.get("document_hash"),
+                "document_hash": app_doc.get("document_hash", ""),
                 "chunk_index": index,
-                "text": chunk,
-                "embedding": AIService._get_embedding_vector(chunk),
-                "embedding_model": EMBEDDING_MODEL,
-                "metadata": {
-                    "applicant_name": app_doc.get("applicant_name"),
-                    "risk_level": app_doc.get("risk_level"),
-                    "chunk_size": len(chunk),
-                },
+                "applicant_name": app_doc.get("applicant_name", ""),
+                "risk_level": app_doc.get("risk_level", ""),
             })
 
-        await retrieval_collection.delete_many({"application_id": application_id})
-        if chunk_documents:
-            await retrieval_collection.insert_many(chunk_documents)
+        # Remove existing chunks for this application before adding fresh ones
+        try:
+            existing = chroma_collection.get(where={"application_id": application_id})
+            if existing and existing["ids"]:
+                chroma_collection.delete(ids=existing["ids"])
+        except Exception:
+            pass
+
+        if documents:
+            chroma_collection.add(
+                ids=ids,
+                documents=documents,
+                embeddings=embeddings,
+                metadatas=metadatas
+            )
 
     @staticmethod
     async def retrieve_relevant_chunks(app_doc: dict, question: str, top_k: int = 4, min_score: float | None = None) -> list[dict]:
@@ -205,60 +193,44 @@ class AIService:
         question_embedding = AIService._get_embedding_vector(question, is_query=True)
         ranked = []
 
-        if application_id:
-            stored_chunks = await retrieval_collection.find({"application_id": application_id}).sort("chunk_index", 1).to_list(length=200)
-            if stored_chunks:
-                for chunk_doc in stored_chunks:
-                    chunk_text = chunk_doc.get("text") or ""
-                    if not chunk_text:
-                        continue
-                    stored_embedding = chunk_doc.get("embedding") or []
-                    if chunk_doc.get("embedding_model") == EMBEDDING_MODEL and stored_embedding:
-                        embedding = stored_embedding
-                    else:
-                        embedding = AIService._get_embedding_vector(chunk_text)
-                        if embedding and chunk_doc.get("_id") is not None:
-                            await retrieval_collection.update_one(
-                                {"_id": chunk_doc["_id"]},
-                                {"$set": {"embedding": embedding, "embedding_model": EMBEDDING_MODEL}},
-                            )
+        if application_id and question_embedding:
+            try:
+                results = chroma_collection.query(
+                    query_embeddings=[question_embedding],
+                    n_results=top_k,
+                    where={"application_id": application_id}
+                )
+                
+                if results and results["documents"] and results["documents"][0]:
+                    docs = results["documents"][0]
+                    metas = results["metadatas"][0]
+                    distances = results["distances"][0] if "distances" in results and results["distances"] else [0.0] * len(docs)
 
-                    if question_embedding and embedding and len(question_embedding) == len(embedding):
-                        score = AIService._compute_cosine_similarity(question_embedding, embedding)
-                    else:
-                        score = AIService._keyword_overlap_score(question, chunk_text)
-                    ranked.append({
-                        "chunk": chunk_text,
-                        "score": score,
-                        "metadata": chunk_doc.get("metadata", {}),
-                        "chunk_index": chunk_doc.get("chunk_index", 0),
-                    })
+                    for doc, meta, dist in zip(docs, metas, distances):
+                        # Convert Chroma distance to similarity score
+                        score = 1.0 - dist if dist <= 1.0 else 0.0
+                        if score >= min_score:
+                            ranked.append({
+                                "chunk": doc,
+                                "score": score,
+                                "metadata": meta,
+                                "chunk_index": meta.get("chunk_index", 0),
+                            })
+            except Exception:
+                logger.exception("Chroma vector search failed for application %s", application_id)
 
         if not ranked:
             raw_text = app_doc.get("raw_text", "") or ""
             for chunk in AIService.split_text_into_chunks(raw_text):
-                chunk_embedding = AIService._get_embedding_vector(chunk)
-                if question_embedding and chunk_embedding and len(question_embedding) == len(chunk_embedding):
-                    score = AIService._compute_cosine_similarity(question_embedding, chunk_embedding)
-                else:
-                    score = AIService._keyword_overlap_score(question, chunk)
                 ranked.append({
                     "chunk": chunk,
-                    "score": score,
+                    "score": 1.0,
                     "metadata": {"fallback": True},
                     "chunk_index": 0,
                 })
 
         ranked = sorted(ranked, key=lambda item: item["score"], reverse=True)
-        filtered = [item for item in ranked if item["score"] >= min_score]
-        if not filtered:
-            filtered = ranked[:1]
-
-        selected = filtered[:top_k]
-        if not selected:
-            return []
-
-        return selected
+        return ranked[:top_k]
 
     @staticmethod
     async def record_retrieval_metrics(application_id: str | None, question: str, results: list[dict]) -> None:
