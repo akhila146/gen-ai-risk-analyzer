@@ -2,23 +2,32 @@ import logging
 import os
 from datetime import datetime
 from io import BytesIO
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 from pypdf import PdfReader
 import docx
 from dotenv import load_dotenv
 
 from database import (
     applications_collection,
-    chat_history_collection,
-    retrieval_metrics_collection,
     build_application_upsert_filter,
     build_document_fingerprint,
     get_effective_application_id,
+    sessions_collection,
+    users_collection,
+)
+from auth import (
+    LoginRequest,
+    SignupRequest,
+    get_current_user,
+    login_account,
+    logout_account,
+    public_user,
+    register_account,
 )
 from services import AIService, PDFService
 
@@ -35,7 +44,9 @@ async def startup_event():
     await applications_collection.create_index([("applicant_id", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("document_hash", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("created_at", -1)])
-    await retrieval_metrics_collection.create_index([("application_id", 1), ("created_at", -1)])
+    await users_collection.create_index("email", unique=True)
+    await sessions_collection.create_index("token_hash", unique=True)
+    await sessions_collection.create_index("expires_at", expireAfterSeconds=0)
 
 
 allowed_origins = {
@@ -51,12 +62,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+ChatText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+
+
+@app.post("/api/auth/signup")
+async def signup(request: SignupRequest):
+    user = await register_account(request)
+    return {"user": user}
+
+
+@app.post("/api/auth/login")
+async def login(request: LoginRequest, response: Response):
+    user = await login_account(request, response)
+    return {"user": user}
+
+
+@app.get("/api/auth/me")
+async def current_user(user: dict = Depends(get_current_user)):
+    return {"user": public_user(user)}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response):
+    return await logout_account(request, response)
+
+
+class ChatTurn(BaseModel):
+    user_msg: ChatText
+    assistant_msg: Annotated[str, StringConstraints(min_length=1, max_length=16000)]
 
 class ChatRequest(BaseModel):
     application_id: str | None = None
     applicant_id: str | None = None
-    scope: str = "application"
-    message: str
+    scope: Literal["application", "global", "general"] = "general"
+    message: ChatText
+    history: list[ChatTurn] = Field(default_factory=list, max_length=6)
 
 
 def parse_file_content(file_bytes: bytes, filename: str) -> tuple[str | None, bytes | None, str | None]:
@@ -201,13 +241,13 @@ async def analyze_uploaded_file(file_name: str, file_bytes: bytes) -> dict:
 
 
 @app.post("/api/analyze")
-async def analyze_file(file: UploadFile = File(...)):
+async def analyze_file(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     file_bytes = await file.read()
     return await analyze_uploaded_file(file.filename or "unknown", file_bytes)
 
 
 @app.post("/api/analyze-bulk")
-async def analyze_bulk_files(files: list[UploadFile] = File(...)):
+async def analyze_bulk_files(files: list[UploadFile] = File(...), user: dict = Depends(get_current_user)):
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required.")
 
@@ -242,7 +282,7 @@ async def analyze_bulk_files(files: list[UploadFile] = File(...)):
 
 
 @app.get("/api/dashboard")
-async def dashboard_summary():
+async def dashboard_summary(user: dict = Depends(get_current_user)):
     applications = await applications_collection.find({}).sort("created_at", -1).to_list(length=200)
     summary = calculate_dashboard_summary(applications)
     return {
@@ -252,52 +292,53 @@ async def dashboard_summary():
 
 
 @app.post("/api/chat")
-async def chat_handler(req: ChatRequest):
-    scope = (req.scope or "application").lower()
-
-    if scope == "global":
-        portfolio_apps = await applications_collection.find({}).sort("created_at", -1).to_list(length=50)
-        if not portfolio_apps:
-            raise HTTPException(status_code=404, detail="No applications found in the portfolio yet.")
-
-        history = []
-        try:
-            reply = await AIService.chat_portfolio_response(portfolio_apps, history, req.message)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Portfolio chat generation failed: {str(exc)}")
-
-        return {"reply": reply, "scope": "global"}
-
+async def chat_handler(req: ChatRequest, user: dict = Depends(get_current_user)):
+    history = [turn.model_dump() for turn in req.history]
     lookup_id = req.application_id or req.applicant_id
-    if not lookup_id:
-        raise HTTPException(status_code=400, detail="Application ID is required for single-application mode.")
-
-    app_doc = await applications_collection.find_one({"application_id": lookup_id})
-    if not app_doc:
-        app_doc = await applications_collection.find_one({"applicant_id": lookup_id})
-    if not app_doc:
-        raise HTTPException(status_code=404, detail="Application record not found.")
-
-    cursor = chat_history_collection.find({"application_id": lookup_id}).sort("_id", -1).limit(6)
-    history = await cursor.to_list(length=6)
-    history.reverse()
-
+    scope = req.scope if req.scope == "global" or lookup_id else "general"
     try:
-        reply = await AIService.chat_rag_response(app_doc, history, req.message)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Chat generation failed: {str(exc)}")
+        if scope == "global":
+            portfolio_apps = await applications_collection.find({}).sort("created_at", -1).to_list(length=50)
+            reply = await AIService.chat_portfolio_response(
+                portfolio_apps, history, req.message,
+            )
+        elif scope == "application":
+            app_doc = await applications_collection.find_one({"application_id": lookup_id})
+            if not app_doc:
+                app_doc = await applications_collection.find_one({"applicant_id": lookup_id})
+            if app_doc:
+                reply = await AIService.chat_rag_response(
+                    app_doc, history, req.message,
+                )
+            else:
+                reply = AIService.generate_chat_response(
+                    {"availability": "The selected application record is not available."},
+                    history, req.message,
+                )
+        else:
+            portfolio_apps = await applications_collection.find({}).sort("created_at", -1).to_list(length=50)
+            app_doc = None
+            if lookup_id:
+                app_doc = await applications_collection.find_one({"application_id": lookup_id})
+                if not app_doc:
+                    app_doc = await applications_collection.find_one({"applicant_id": lookup_id})
+            reply = await AIService.chat_portfolio_response(
+                portfolio_apps, history, req.message,
+                app_doc=app_doc, selected_application_id=lookup_id,
+            )
+    except Exception:
+        logger.exception("Chat response failed")
+        raise HTTPException(status_code=503, detail="The assistant is temporarily unavailable. Please try again.") from None
 
-    await chat_history_collection.insert_one({
-        "application_id": lookup_id,
-        "user_msg": req.message,
-        "assistant_msg": reply,
-    })
-
-    return {"reply": reply, "scope": "application"}
+    return {"reply": reply, "scope": scope}
 
 
 @app.get("/api/download-report")
-async def download_report(application_id: str | None = Query(default=None), applicant_id: str | None = Query(default=None)):
+async def download_report(
+    application_id: str | None = Query(default=None),
+    applicant_id: str | None = Query(default=None),
+    user: dict = Depends(get_current_user),
+):
     lookup_id = application_id or applicant_id
     if not lookup_id:
         raise HTTPException(status_code=400, detail="Application ID is required.")
