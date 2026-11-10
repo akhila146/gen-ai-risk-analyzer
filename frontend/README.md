@@ -50,31 +50,39 @@ Both typed and voice questions request English replies. Multilingual response
 selection and language hints are not supported. The existing factual and
 read-only policies remain unchanged.
 
-## Authentication
+## Local demo access
 
-The workspace is protected by server-side MongoDB sessions stored in an
-HttpOnly cookie. Create an account at `/signup` and sign in at `/login`.
-Passwords are hashed with scrypt, and all workspace API endpoints require an
-authenticated session.
+The workspace opens directly without login, signup, session checks, or logout.
+Legacy `/login` and `/signup` browser URLs also render the workspace. All workspace
+APIs are accessible without credentials; the former `/api/auth/*` routes are removed.
+Existing application records and browser chat history are unchanged. Existing
+account/session database collections are not deleted, but are no longer used.
 
-Copy `backend/.env.example` to `backend/.env` and configure MongoDB.
-For local HTTP development, `AUTH_COOKIE_SECURE=false`; set it to `true` for
-HTTPS deployments. Copy `frontend/.env.example` to `frontend/.env` and set
-`VITE_API_URL` to the backend origin when it differs from `http://localhost:8000`.
+**Local/demo use only:** anyone who can reach the backend can read application
+data, upload files, download reports, and invoke AI services. Bind both servers
+to localhost; do not expose this version to a shared network or production
+without an approved access-control layer.
 
-Application analysis data remains shared among authenticated accounts, matching
-the existing shared MongoDB workspace model.
+Configure `MONGODB_URL` and `DATABASE_NAME` in `backend/.env`.
+Copy `frontend/.env.example` to `frontend/.env` and set `VITE_API_URL` when the
+backend origin differs from `http://localhost:8000`. Authentication cookie
+configuration is no longer used.
 
-### Authentication test steps
+### Direct-access test steps
 
-1. Start MongoDB, configure the backend environment, then start the backend and frontend as usual.
-2. Visit `/signup` and create an account with a valid name, email, and matching
-   passwords of at least 12 characters. Verify the app returns to `/login` and
-   reusing the email is rejected.
-3. Sign in, open the profile menu in the sidebar, and choose **Log out**. Sign
-   in again and refresh the page to verify the session persists.
-4. Open `/` while logged out and call a protected `/api/*` endpoint without the
-   session cookie; the browser redirects to login and the API returns 401.
+1. Start MongoDB and run the backend with `uvicorn main:app --host 127.0.0.1 --port 8000`
+   from the backend directory. Run `npm run dev -- --host 127.0.0.1` from the frontend.
+2. Open `/` in a fresh browser session. Verify Analyze files, Reports, and Overview
+   appear immediately, without an account screen or a logout control.
+3. Refresh `/dashboard`, `/`, `/login`, and `/signup`; each should show the same
+   workspace with `/dashboard` as the URL path, without adding a browser history
+   entry. The obsolete `#main-content` fragment is removed; other section links
+   and query parameters are preserved. Hosts must serve the frontend entry page
+   for `/dashboard` (Vite's development and preview servers support this).
+4. Verify `/api/dashboard` works without a session cookie. Upload a test file,
+   download its report, and send a chat message to confirm existing workflows.
+5. Backend regression checks: from the backend directory, run
+   `python -m unittest discover -s tests -p "test_direct_access.py"`.
 
 Browser speech recognition requires HTTPS or localhost, microphone permission,
 and a compatible browser with English recognition and playback support.

@@ -4,7 +4,7 @@ from datetime import datetime
 from io import BytesIO
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
@@ -17,17 +17,6 @@ from database import (
     build_application_upsert_filter,
     build_document_fingerprint,
     get_effective_application_id,
-    sessions_collection,
-    users_collection,
-)
-from auth import (
-    LoginRequest,
-    SignupRequest,
-    get_current_user,
-    login_account,
-    logout_account,
-    public_user,
-    register_account,
 )
 from services import AIService, PDFService
 
@@ -44,9 +33,6 @@ async def startup_event():
     await applications_collection.create_index([("applicant_id", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("document_hash", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("created_at", -1)])
-    await users_collection.create_index("email", unique=True)
-    await sessions_collection.create_index("token_hash", unique=True)
-    await sessions_collection.create_index("expires_at", expireAfterSeconds=0)
 
 
 allowed_origins = {
@@ -57,34 +43,11 @@ allowed_origins = {
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(allowed_origins),
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 ChatText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
-
-
-@app.post("/api/auth/signup")
-async def signup(request: SignupRequest):
-    user = await register_account(request)
-    return {"user": user}
-
-
-@app.post("/api/auth/login")
-async def login(request: LoginRequest, response: Response):
-    user = await login_account(request, response)
-    return {"user": user}
-
-
-@app.get("/api/auth/me")
-async def current_user(user: dict = Depends(get_current_user)):
-    return {"user": public_user(user)}
-
-
-@app.post("/api/auth/logout")
-async def logout(request: Request, response: Response):
-    return await logout_account(request, response)
 
 
 class ChatTurn(BaseModel):
@@ -241,13 +204,13 @@ async def analyze_uploaded_file(file_name: str, file_bytes: bytes) -> dict:
 
 
 @app.post("/api/analyze")
-async def analyze_file(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+async def analyze_file(file: UploadFile = File(...)):
     file_bytes = await file.read()
     return await analyze_uploaded_file(file.filename or "unknown", file_bytes)
 
 
 @app.post("/api/analyze-bulk")
-async def analyze_bulk_files(files: list[UploadFile] = File(...), user: dict = Depends(get_current_user)):
+async def analyze_bulk_files(files: list[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required.")
 
@@ -282,7 +245,7 @@ async def analyze_bulk_files(files: list[UploadFile] = File(...), user: dict = D
 
 
 @app.get("/api/dashboard")
-async def dashboard_summary(user: dict = Depends(get_current_user)):
+async def dashboard_summary():
     applications = await applications_collection.find({}).sort("created_at", -1).to_list(length=200)
     summary = calculate_dashboard_summary(applications)
     return {
@@ -292,7 +255,7 @@ async def dashboard_summary(user: dict = Depends(get_current_user)):
 
 
 @app.post("/api/chat")
-async def chat_handler(req: ChatRequest, user: dict = Depends(get_current_user)):
+async def chat_handler(req: ChatRequest):
     history = [turn.model_dump() for turn in req.history]
     lookup_id = req.application_id or req.applicant_id
     scope = req.scope if req.scope == "global" or lookup_id else "general"
@@ -337,7 +300,6 @@ async def chat_handler(req: ChatRequest, user: dict = Depends(get_current_user))
 async def download_report(
     application_id: str | None = Query(default=None),
     applicant_id: str | None = Query(default=None),
-    user: dict = Depends(get_current_user),
 ):
     lookup_id = application_id or applicant_id
     if not lookup_id:
