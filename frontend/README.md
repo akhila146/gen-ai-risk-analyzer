@@ -50,39 +50,130 @@ Both typed and voice questions request English replies. Multilingual response
 selection and language hints are not supported. The existing factual and
 read-only policies remain unchanged.
 
-## Local demo access
+## Okta sign-in
 
-The workspace opens directly without login, signup, session checks, or logout.
-Legacy `/login` and `/signup` browser URLs also render the workspace. All workspace
-APIs are accessible without credentials; the former `/api/auth/*` routes are removed.
-Existing application records and browser chat history are unchanged. Existing
-account/session database collections are not deleted, but are no longer used.
+The sign-in screen uses a frosted-glass card, a subtle grid, and brighter mint,
+blue, and gold aurora ribbons against a deep teal background. The ribbons sweep
+into place on page entry and settle within 4.5 seconds; there is no continuous
+decorative animation or pause/play button. Reduced-motion preferences disable
+animations and hover movement. Only transforms and opacity are animated;
+no JavaScript animation loop or animation library is used. The screen supports narrow viewports,
+visible keyboard focus, and forced-colors mode. The wider, compact sign-in card
+reduces text wrapping and vertical scrolling on laptop screens, while retaining
+natural scrolling for smaller viewports, zoom, and long error messages.
+Browsers without backdrop-filter
+support receive an opaque card. Styling uses CSS and existing icons only, with no
+additional animation libraries or image downloads. The Okta authentication flow
+and configuration/error messages are unchanged.
 
-**Local/demo use only:** anyone who can reach the backend can read application
-data, upload files, download reports, and invoke AI services. Bind both servers
-to localhost; do not expose this version to a shared network or production
-without an approved access-control layer.
+Sign-in uses Okta's hosted page with OIDC Authorization Code + PKCE. The app
+never collects a password or uses a client secret. All five backend APIs require
+a signed access token; the backend checks RS256, issuer, audience, expiration,
+subject, SPA client ID, and the configured API scope. ID tokens cannot authorize
+API calls. Missing backend settings fail startup rather than enabling anonymous
+access. API documentation endpoints are disabled.
 
-Configure `MONGODB_URL` and `DATABASE_NAME` in `backend/.env`.
-Copy `frontend/.env.example` to `frontend/.env` and set `VITE_API_URL` when the
-backend origin differs from `http://localhost:8000`. Authentication cookie
-configuration is no longer used.
+**Access model:** users assigned to this Okta app and granted the API scope share
+the existing application records, analysis, reports, and assistant. This does not
+add record ownership, group-specific roles, or tenant isolation. Configure Okta
+assignments and authorization-server access policies accordingly.
 
-### Direct-access test steps
+### Configure Okta
 
-1. Start MongoDB and run the backend with `uvicorn main:app --host 127.0.0.1 --port 8000`
-   from the backend directory. Run `npm run dev -- --host 127.0.0.1` from the frontend.
-2. Open `/` in a fresh browser session. Verify Analyze files, Reports, and Overview
-   appear immediately, without an account screen or a logout control.
-3. Refresh `/dashboard`, `/`, `/login`, and `/signup`; each should show the same
-   workspace with `/dashboard` as the URL path, without adding a browser history
-   entry. The obsolete `#main-content` fragment is removed; other section links
-   and query parameters are preserved. Hosts must serve the frontend entry page
-   for `/dashboard` (Vite's development and preview servers support this).
-4. Verify `/api/dashboard` works without a session cookie. Upload a test file,
-   download its report, and send a chat message to confirm existing workflows.
-5. Backend regression checks: from the backend directory, run
-   `python -m unittest discover -s tests -p "test_direct_access.py"`.
+1. In Okta Admin, create an **OIDC / Single-Page Application** with the
+   **Authorization Code** and **Refresh Token** grants. Do not select a confidential web application or
+   add a client secret to frontend configuration.
+2. Register `http://localhost:5173/login/callback` as a sign-in redirect URI and
+   `http://localhost:5173` as a sign-out redirect URI. Add the frontend origin to
+   Okta Trusted Origins for CORS/redirects where required. Use exactly the same
+   hostname when browsing; `127.0.0.1` and `localhost` are different origins.
+3. Use a **custom authorization server**, such as
+   `https://your-org.okta.com/oauth2/default`, with audience `api://default`.
+   The bare Okta organization issuer is not suitable for this API. A production
+   subscription may require Okta API Access Management.
+4. Create an API scope `risk.read` and an access policy/rule granting it to this
+   SPA and the intended assigned users. Here this scope grants the entire shared
+   workspace, including uploads and AI requests, not only read operations.
+5. Assign permitted users/groups to the app. MFA and account recovery remain
+   managed by Okta policy.
+6. In the app's **General > Refresh Token** settings, select **Rotate token after
+   every use**. In the authorization server's access-policy rule, allow
+   **Authorization Code** and **Refresh Token**, and allow these requested scopes:
+   `openid`, `profile`, `email`, `offline_access`, `risk.read`.
+   `offline_access` is a standard scope; do not create a custom scope with that name.
+7. Set lifetimes according to organization policy. A starting point is a
+   **15-minute access token**, **8-hour maximum refresh-token lifetime**, and
+   **1-hour refresh-token idle expiry**. These are Okta settings, not app-enforced
+   durations. Save the settings, then sign out and sign in again to obtain a
+   refresh token; existing sessions without one require a fresh sign-in.
+
+### Configure and run the application
+
+- Copy [the frontend example](.env.example) to `frontend/.env`. Set
+  `VITE_OKTA_ISSUER`, `VITE_OKTA_CLIENT_ID`, and `VITE_OKTA_SCOPE`; set `VITE_API_URL`
+  if the backend differs from `http://localhost:8000`.
+- Merge [the backend example](../backend/.env.example) into your existing
+  `backend/.env` without overwriting MongoDB or AI-provider settings. Set
+  `OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_AUDIENCE`, `OKTA_REQUIRED_SCOPE`, and
+  `FRONTEND_URL`. Both sides must use the same issuer, SPA client ID, and scope.
+- Run `npm install` in the frontend and
+  `.\venv\Scripts\python.exe -m pip install -r requirements.txt` in the backend.
+  If the virtual environment does not exist, create it first with `python -m venv venv`.
+- Start MongoDB, then
+  `.\venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8000` in the
+  backend and `npm run dev -- --host localhost` in the frontend.
+- On Windows, use the explicit virtual-environment interpreter above rather than
+  bare `uvicorn`, which may resolve to a global installation without the project's
+  dependencies. If you see `ModuleNotFoundError: No module named 'jwt'`, stop the
+  failed reloader with Ctrl+C and restart with the command above. The package that
+  supplies `jwt` is `PyJWT[crypto]`, already listed in the backend requirements.
+- Open `http://localhost:5173`. Environment changes require restarting the backend
+  and restarting/rebuilding the frontend. Never commit actual environment secrets.
+
+Tokens are stored in tab-scoped session storage with no local-storage/cookie
+fallback. Refresh retains the tab's login. The app requests `offline_access` and
+uses the SDK to renew expiring access tokens before API calls and during session
+checks. Concurrent renewals share the SDK's in-flight request, and rotated tokens
+are saved by the SDK. There is no continuous background renewal in idle tabs, so
+idle expiry remains meaningful and unnecessary network requests are avoided.
+Expired/revoked refresh tokens, failed renewal, or an API 401 return to sign-in.
+API requests are not automatically replayed, avoiding duplicate uploads or AI calls.
+Refresh tokens are sent only to Okta, never to the backend API.
+Sign out clears local tokens, requests access/refresh-token revocation, and
+requests Okta session logout; remote logout failure
+is shown explicitly. A 403 indicates that the user lacks the configured scope;
+a 503 can indicate that Okta signing keys are temporarily unreachable.
+JWT verification is local: previously issued tokens can remain valid until
+expiry after assignment changes or revocation. Use short access-token lifetimes;
+immediate revocation enforcement would require an additional introspection policy.
+
+Report downloads use authorized requests, never tokens in query strings.
+API responses include no-store, nosniff, anti-framing, and no-referrer headers.
+In production serve both apps over HTTPS, restrict CORS to deployed origins,
+and configure the frontend host/reverse proxy with HSTS, CSP (including the
+specific Okta/API connections), frame-ancestors, and other required security
+headers. Serve the SPA entry point for `/login/callback` and `/dashboard`.
+
+### Authentication checks
+
+1. Without signing in, `/`, `/dashboard`, `/login`, and `/signup` show sign-in,
+   not workspace data. Direct calls to each `/api/*` endpoint return 401.
+2. Sign in with an assigned Okta user. Confirm dashboard, uploads, chat, and PDF
+   downloads work; refresh the page and confirm the callback is not repeated.
+3. Sign out and confirm protected content disappears. A different user must not
+   see the previous user's browser chat history. Legacy anonymous history is
+   left untouched but is not loaded into any signed-in account.
+4. Let the access token expire, then load dashboard/chat/download a report.
+   Verify Okta receives a refresh-token grant and the API receives the new access
+   token without a login redirect. Check idle/max refresh expiry, revoked refresh
+   tokens, and a failed refresh request: each must return to sign-in without
+   replaying an upload or chat request. Also check denied/cancelled login, missing scope,
+   and an incorrectly configured issuer/audience. Tokens must never be logged.
+5. Frontend checks: `npm run lint` and `npm run build`. Automated test files
+   are not included; use the manual regression checks above when changing authentication.
+
+Live redirect, rotation, expiry-policy, MFA, and remote logout checks require a configured Okta tenant;
+build checks do not certify its policies or credentials.
 
 Browser speech recognition requires HTTPS or localhost, microphone permission,
 and a compatible browser with English recognition and playback support.
@@ -93,10 +184,11 @@ only reviewed message text is sent to the existing chat API and saved in history
 Changing/closing chats stops capture and playback, and late replies from earlier
 chat contexts are not read aloud.
 
-Conversations are stored in this browser profile's local storage, including after
+Conversations are stored per Okta issuer and user in this browser profile's local storage, including after
 refreshing or reopening the browser. They are not synchronized across devices or
 saved to the application database. Anyone using the same browser profile can
-access them; avoid saving sensitive information on a shared device. Clearing this
+inspect them through browser tools; account-scoped keys are not encryption.
+Avoid saving sensitive information on a shared device. Clearing this
 site's browser data removes the saved history. Private browsing or browser storage
 policies may limit persistence. Storage errors are displayed rather than silently
 discarding saved chats, and no automatic history pruning is performed.

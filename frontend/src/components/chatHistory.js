@@ -33,7 +33,7 @@ function isSavedChat(chat) {
       && typeof turn.assistant_msg === 'string' && turn.assistant_msg.length > 0 && turn.assistant_msg.length <= 16000);
 }
 
-export function loadChatState(applicationId = null) {
+export function loadChatState(applicationId = null, identity) {
   const initialChat = createChat(applicationId);
   const initialState = {
     chats: [initialChat],
@@ -42,7 +42,8 @@ export function loadChatState(applicationId = null) {
     persistenceEnabled: true,
   };
   try {
-    const saved = window.localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!identity) throw new Error('An authenticated identity is required for chat history.');
+    const saved = window.localStorage.getItem(`${CHAT_STORAGE_KEY}:${identity}`);
     if (saved === null) return initialState;
     const parsed = JSON.parse(saved);
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.chats)
@@ -78,8 +79,9 @@ export function loadChatState(applicationId = null) {
   }
 }
 
-export function saveChatState(chats, activeChatId) {
-  window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({ version: 1, chats, activeChatId }));
+export function saveChatState(chats, activeChatId, identity) {
+  if (!identity) throw new Error('An authenticated identity is required for chat history.');
+  window.localStorage.setItem(`${CHAT_STORAGE_KEY}:${identity}`, JSON.stringify({ version: 1, chats, activeChatId }));
 }
 
 export function updateChat(chats, chatId, update, moveToTop = false) {

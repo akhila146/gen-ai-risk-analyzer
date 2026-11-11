@@ -4,7 +4,7 @@ from datetime import datetime
 from io import BytesIO
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
@@ -19,16 +19,24 @@ from database import (
     get_effective_application_id,
 )
 from services import AIService, PDFService
+from auth import get_okta_verifier, require_user
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-app = FastAPI(title="GenAI Credit Risk Analyzer")
+app = FastAPI(
+    title="GenAI Credit Risk Analyzer",
+    dependencies=[Depends(require_user)],
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 @app.on_event("startup")
 async def startup_event():
+    get_okta_verifier()
     await applications_collection.create_index([("application_id", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("applicant_id", 1)], unique=True, sparse=True)
     await applications_collection.create_index([("document_hash", 1)], unique=True, sparse=True)
@@ -46,6 +54,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def protect_response_headers(request, call_next):
+    """Prevent sensitive API responses from being cached or embedded."""
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 ChatText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
 

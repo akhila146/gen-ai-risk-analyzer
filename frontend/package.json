@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@okta/okta-auth-js": "^8.0.1",
     "axios": "^1.20.0",
     "lucide-react": "^1.47.0",
     "react": "^19.2.8",

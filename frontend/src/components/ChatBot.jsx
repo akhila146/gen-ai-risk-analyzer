@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import axios from 'axios';
-import { API_BASE_URL } from '../api';
+import { api } from '../api';
 import { MessageSquare, Mic, MicOff, Plus, Square, Trash2, X, Send } from 'lucide-react';
 import { createChat, loadChatState, removeChat, saveChatState, updateChat } from './chatHistory';
 import { createChatSpeech } from './chatSpeech';
@@ -46,9 +45,9 @@ function renderMessageWithBadges(text, onSelectApplication) {
   return <>{parts}</>;
 }
 
-export default function ChatBot({ applicationId, applications = [], onSelectApplication }) {
+export default function ChatBot({ applicationId, applications = [], onSelectApplication, identity }) {
   const [isOpen, setIsOpen] = useState(false);
-  const [chatState, setChatState] = useState(() => loadChatState(applicationId || null));
+  const [chatState, setChatState] = useState(() => loadChatState(applicationId || null, identity));
   const [inputMsg, setInputMsg] = useState('');
   const [loadingChatIds, setLoadingChatIds] = useState([]);
   const [hasVoiceInput, setHasVoiceInput] = useState(false);
@@ -75,6 +74,14 @@ export default function ChatBot({ applicationId, applications = [], onSelectAppl
   const recentChats = chats.filter((chat) => chat.messages.some((message) => message.sender === 'user'));
 
   useEffect(() => {
+    const requests = inFlight.current;
+    return () => {
+      for (const controller of requests.values()) controller.abort();
+      requests.clear();
+    };
+  }, []);
+
+  useEffect(() => {
     speech.cancel();
     setHasVoiceInput(false);
     setSpeechError('');
@@ -97,7 +104,7 @@ export default function ChatBot({ applicationId, applications = [], onSelectAppl
   useEffect(() => {
     if (!persistenceEnabled) return;
     try {
-      saveChatState(chats, activeChatId);
+      saveChatState(chats, activeChatId, identity);
       setChatState((previous) => previous.storageError ? { ...previous, storageError: '' } : previous);
     } catch {
       console.error('Chat history could not be saved in this browser.');
@@ -106,7 +113,7 @@ export default function ChatBot({ applicationId, applications = [], onSelectAppl
         storageError: 'These changes could not be saved in this browser. Keep this page open to retain them.',
       }));
     }
-  }, [chats, activeChatId, persistenceEnabled]);
+  }, [chats, activeChatId, persistenceEnabled, identity]);
 
   useEffect(() => {
     if (previousApplicationId.current === applicationId) return;
@@ -205,7 +212,7 @@ export default function ChatBot({ applicationId, applications = [], onSelectAppl
         payload.application_id = selectedAppId;
       }
 
-      const res = await axios.post(`${API_BASE_URL}/api/chat`, payload, { signal: controller.signal });
+      const res = await api.post('/api/chat', payload, { signal: controller.signal });
       if (controller.signal.aborted) return;
       if (typeof res.data.reply !== 'string' || !res.data.reply.trim() || res.data.reply.length > 16000) {
         throw new Error('Invalid assistant response');
