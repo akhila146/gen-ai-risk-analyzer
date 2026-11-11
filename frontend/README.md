@@ -8,6 +8,38 @@ heading. Reports use a single "Application results" heading, and the dashboard
 appears afterward without a separate visible overview heading. Accessible page,
 upload-section, and overview headings remain available to screen readers.
 
+## Document-analysis latency
+
+Document embeddings use batches of up to 32 chunks instead of one network call
+per chunk. Each chunk is a separate Gemini `Content`, so Gemini Embedding 2 does
+not aggregate the entire batch into one vector. Chunk size, prompts, model
+selection, analysis results, and the awaited indexing flow are unchanged.
+
+A complete matching Chroma index is reused when the chunk content, embedding
+model, and embedding-input format are unchanged. Metadata-only changes update
+metadata without generating embeddings. Legacy, incomplete, or changed indexes
+are rebuilt on the next upload. Gemini document analysis still runs for every
+upload; previously generated credit-risk assessments are not cached.
+
+All new vectors are validated before the index is updated. Existing vectors are
+not deleted when embedding generation fails. Stale chunks are removed only after
+the replacement vectors have been upserted. Indexing errors remain explicitly
+logged; the existing best-effort analysis response and chat fallback are retained.
+Retrieval matches the current document hash when available, so retained vectors
+from a previous document version do not become evidence for the replacement.
+
+Blocking parsing, Gemini calls/retries, and Chroma operations run in worker
+threads rather than blocking FastAPI's event loop. This improves responsiveness
+under concurrent use; it does not make an individual Gemini generation faster.
+Bulk documents remain sequential to preserve existing update ordering.
+
+The backend console logs `analysis_timing` (parse, Gemini, database, indexing,
+total milliseconds) and `index_timing` (chunk count, embedding batch count,
+cache hit, and embedding/indexing time). These logs contain no document content,
+credentials, or filenames. Compare timings on representative uploads to measure
+actual latency: provider delays and retries can still dominate total time.
+Chroma remains cloud-hosted; no data migration or background indexing was added.
+
 ## Read-only assistant
 
 The assistant supports general conversation without selecting an application or
